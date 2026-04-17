@@ -3,9 +3,11 @@ Reads/
 trimmed/
 salmon_index/
 cache/
+*.zip
+
+# Exclude per-sample QC directories (we keep only MultiQC moved to 01_qc/)
 QC_pre/
 QC_post/
-*.zip
 
 # --- Common bioinformatics outputs that can be huge ---
 *.fastq
