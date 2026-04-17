@@ -12,5 +12,6 @@ Main reports included:
 - 03_enrichment/
 - 04_interproscan/
 
-## Notes
-Large raw data and intermediate outputs are excluded via .gitignore.
+## LINK HTML
+### https://kurisutina132.github.io/transcriptoma-tesis/
+
