@@ -1,0 +1,325 @@
+---
+title: "Differential Expression Analysis and Enrichment Analysis"
+author: "Cristy Medina Armijo"
+date: "2026-03-12"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    runtime: shiny
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+suppressPackageStartupMessages({
+  library(shiny)
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(ggplot2)
+  library(ggrepel)
+  library(DT)
+  library(tibble)
+  library(pheatmap)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+
+
+project_root <- "C:/Users/kuris/OneDrive/Escritorio/tesis/trancriptoma"
+setwd(project_root)
+
+# ---- Inputs ----
+dds <- readRDS("deseq2_out/dds.rds")
+map <- read_tsv("deseq2_out/gene_id_mapping.tsv", show_col_types = FALSE)
+
+# ---- Helpers ----
+clean_sample_label <- function(x) sub("_.*$", "", as.character(x))
+
+preferred_order <- c("C1_me","C2_me","C3_me","T1_as","T2_as","T3_as","T4_cr","T5_cr","T6_cr")
+
+condition_from_label <- function(lbl) {
+  s2 <- tolower(lbl)
+  dplyr::case_when(
+    str_detect(s2, "^c") ~ "Control",
+    str_detect(s2, "as") ~ "As",
+    str_detect(s2, "cr") ~ "Cr",
+    TRUE ~ "Unknown"
+  )
+}
+
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)  # para colData()
+  # o, alternativamente:
+  # library(DESeq2)
+})
+
+coldata <- as.data.frame(colData(dds)) |>
+  tibble::rownames_to_column("sample_id") |>
+  mutate(
+    sample_label = clean_sample_label(sample_id),
+    condition_plot = condition_from_label(sample_label)
+  )
+
+# ---- DE helpers ----
+read_deseq2_tbl <- function(path) {
+  read_tsv(path, show_col_types = FALSE) |>
+    left_join(map, by = "gene_id") |>
+    mutate(pretty_id = coalesce(pretty_id, gene_id)) |>
+    transmute(
+      `Identificación genética` = pretty_id,
+      baseMean = baseMean,
+      log2FoldChange = log2FoldChange,
+      lfcSE = lfcSE,
+      stat = stat,
+      pvalue = pvalue,
+      padj = padj
+    )
+}
+
+deseq2_dt <- function(path) {
+  DT::datatable(
+    read_deseq2_tbl(path),
+    rownames = FALSE,
+    extensions = c("Buttons", "Scroller"),
+    options = list(
+      dom="Bfrtip",
+      buttons=c("csv","excel"),
+      pageLength=10,
+      scrollX=TRUE,
+      scrollY=350,
+      scroller=TRUE
+    )
+  )
+}
+
+summarize_deg <- function(path, padj_cut = 0.05, lfc_cut = 0.3) {
+  x <- read_tsv(path, show_col_types = FALSE)
+  sig <- x |> filter(!is.na(padj), padj < padj_cut)
+  up <- sig |> filter(log2FoldChange >= lfc_cut)
+  down <- sig |> filter(log2FoldChange <= -lfc_cut)
+
+  tibble(
+    genes_en_tabla = nrow(x),
+    DEGs_padj_0.05 = nrow(sig),
+    sobreexpresados = nrow(up),
+    subexpresados = nrow(down)
+  )
+}
+
+ma_plot <- function(path, title) {
+  df <- read_tsv(path, show_col_types = FALSE)
+  ggplot(df, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point(alpha = 0.4, size = 1) +
+    scale_x_log10() +
+    geom_hline(yintercept = 0, color = "grey30") +
+    labs(title = title, x = "baseMean (log10)", y = "log2 fold change") +
+    theme_bw()
+}
+
+volcano_plot <- function(path, title, p_cut = 0.05, lfc_cut = 0.3, use_padj = TRUE) {
+  df <- read_tsv(path, show_col_types = FALSE) |>
+    left_join(map, by = "gene_id") |>
+    mutate(pretty_id = coalesce(pretty_id, gene_id))
+
+  pcol <- if (use_padj && "padj" %in% names(df)) "padj" else "pvalue"
+
+  df <- df |>
+    mutate(
+      p_use = .data[[pcol]],
+      neglog10p = -log10(pmax(p_use, 1e-300)),
+      sig_p = !is.na(p_use) & p_use < p_cut,
+      sig_lfc = abs(log2FoldChange) >= lfc_cut,
+      cat = case_when(
+        sig_p & sig_lfc ~ "p-value and log2FC",
+        sig_lfc & !sig_p ~ "Log2 FC",
+        sig_p & !sig_lfc ~ "P-value",
+        TRUE ~ "NS"
+      )
+    ) |>
+    filter(is.finite(log2FoldChange), is.finite(neglog10p))
+
+  cols <- c(
+    "NS" = "grey70",
+    "Log2 FC" = "#2ca02c",
+    "P-value" = "#1f77b4",
+    "p-value and log2FC" = "#d62728"
+  )
+
+  ggplot(df, aes(log2FoldChange, neglog10p, color = cat)) +
+    geom_point(alpha = 0.75, size = 1.3) +
+    geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", color = "grey30") +
+    geom_hline(yintercept = -log10(p_cut), linetype = "dashed", color = "grey30") +
+    scale_color_manual(values = cols, breaks = names(cols)) +
+    labs(title = title, x = "Log2 fold change", y = expression(-log[10](p)), color = "") +
+    theme_bw()
+}
+
+# ComplexHeatmap: top500 + top20 leader lines, clusters separados
+heatmap_degs_top500_complex_blocks <- function(
+  path,
+  title,
+  n_show = 500,
+  n_mark_total = 20,
+  n_clusters = 2,
+  padj_cut = 0.05,
+  anno_fontsize = 8,
+  heatmap_height_cm = 22,
+  gap_mm = 16
+) {
+  vst <- readRDS("deseq2_out/vst_assay.rds")
+
+  res <- readr::read_tsv(path, show_col_types = FALSE) %>%
+    dplyr::mutate(padj = ifelse(is.na(padj), 1, padj)) %>%
+    dplyr::left_join(map, by = "gene_id") %>%
+    dplyr::mutate(pretty_id = dplyr::coalesce(pretty_id, gene_id))
+
+  show_tbl <- res %>%
+    dplyr::arrange(padj, dplyr::desc(abs(log2FoldChange))) %>%
+    dplyr::slice_head(n = n_show)
+
+  mat <- vst[show_tbl$gene_id, , drop = FALSE]
+  rownames(mat) <- show_tbl$pretty_id
+
+  colnames(mat) <- clean_sample_label(colnames(mat))
+  common <- intersect(preferred_order, colnames(mat))
+  if (length(common) >= 2) mat <- mat[, common, drop = FALSE]
+
+  mat_z <- t(scale(t(mat)))
+  mat_z[is.na(mat_z)] <- 0
+
+  col_group <- ifelse(grepl("^C", colnames(mat_z), ignore.case = TRUE), "C", "T")
+  col_group <- factor(col_group, levels = c("C", "T"))
+  ha <- ComplexHeatmap::HeatmapAnnotation(
+    Condition = col_group,
+    col = list(Condition = c(C = "#7FC97F", T = "#BEAED4")),
+    annotation_name_side = "right"
+  )
+
+  col_fun <- circlize::colorRamp2(c(-4, 0, 4), c("#3B4CC0", "white", "#B40426"))
+
+  ht <- ComplexHeatmap::Heatmap(
+    mat_z,
+    name = "Z-score",
+    col = col_fun,
+    top_annotation = ha,
+    cluster_rows = TRUE,
+    row_split = n_clusters,
+    cluster_columns = TRUE,
+    show_row_names = FALSE,
+    show_column_names = TRUE,
+    column_names_gp = grid::gpar(fontsize = 11),
+    column_names_rot = 90,
+    gap = grid::unit(gap_mm, "mm"),
+    height = grid::unit(heatmap_height_cm, "cm"),
+    row_title_side = "left",
+    row_title_gp = grid::gpar(fontsize = 13, fontface = "bold")
+  )
+
+  ht_drawn <- ComplexHeatmap::draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    padding = grid::unit(c(4, 20, 4, 6), "mm")
+  )
+
+  ord_list <- ComplexHeatmap::row_order(ht_drawn)
+  pretty_ids <- rownames(mat_z)
+  cl_by_gene <- rep(NA_integer_, length(pretty_ids))
+  names(cl_by_gene) <- pretty_ids
+  for (i in seq_along(ord_list)) cl_by_gene[ pretty_ids[ ord_list[[i]] ] ] <- i
+
+  pool <- res %>%
+    dplyr::filter(padj < padj_cut) %>%
+    dplyr::arrange(padj, dplyr::desc(abs(log2FoldChange))) %>%
+    dplyr::distinct(pretty_id, .keep_all = TRUE) %>%
+    dplyr::filter(pretty_id %in% pretty_ids) %>%
+    dplyr::mutate(cluster = cl_by_gene[pretty_id])
+
+  per_cl <- max(1, floor(n_mark_total / n_clusters))
+  marked <- pool %>% dplyr::group_by(cluster) %>% dplyr::slice_head(n = per_cl) %>% dplyr::ungroup()
+  if (nrow(marked) < n_mark_total) {
+    extra <- pool %>% dplyr::anti_join(marked, by = "pretty_id") %>%
+      dplyr::slice_head(n = n_mark_total - nrow(marked))
+    marked <- dplyr::bind_rows(marked, extra)
+  }
+
+  # ---- FIX: numeric indices for anno_mark ----
+  mark_labels <- marked$pretty_id
+  mark_at <- match(mark_labels, rownames(mat_z))
+  keep <- which(!is.na(mark_at))
+  mark_at <- mark_at[keep]
+  mark_labels <- mark_labels[keep]
+
+  ra <- ComplexHeatmap::rowAnnotation(
+    `Top 20` = ComplexHeatmap::anno_mark(
+      at = mark_at,
+      labels = mark_labels,
+      labels_gp = grid::gpar(fontsize = anno_fontsize),
+      link_width = grid::unit(14, "mm"),
+      link_gp = grid::gpar(col = "grey35", lwd = 0.7),
+      padding = grid::unit(1, "mm")
+    ),
+    width = grid::unit(10, "cm")
+  )
+
+  ComplexHeatmap::draw(
+    ht + ra,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    padding = grid::unit(c(4, 40, 4, 6), "mm")
+  )
+
+  grid::grid.text(
+    title,
+    x = grid::unit(0.5, "npc"),
+    y = grid::unit(0.98, "npc"),
+    gp = grid::gpar(fontsize = 14, fontface = "bold")
+  )
+}
+```
+
+# Quality Control Results
+
+## Reads Quality Control
+*(Aquí puedes insertar figuras de MultiQC/FastQC si tienes imágenes o links.)*
+
+## Overall Results - Estado
+
+### Tabla general de recuentos por muestra
+```{r}
+
+
+counts_tbl <- read_tsv("deseq2_out/sample_gene_counts.tsv", show_col_types = FALSE)
+
+old_cols <- colnames(counts_tbl)
+new_cols <- ifelse(old_cols == "pretty_id", "pretty_id", clean_sample_label(old_cols))
+colnames(counts_tbl) <- new_cols
+
+preferred <- c("pretty_id", preferred_order)
+existing_pref <- preferred[preferred %in% colnames(counts_tbl)]
+rest <- base::setdiff(colnames(counts_tbl), existing_pref)
+counts_tbl2 <- counts_tbl %>% select(all_of(existing_pref), all_of(rest))
+
+DT::datatable(
+  counts_tbl2,
+  rownames = FALSE,
+  extensions = c("Buttons", "Scroller"),
+  options = list(
+    dom = "Bfrtip",
+    pageLength = 10,
+    scrollX = TRUE,
+    scrollY = 300,
+    scroller = TRUE,
+    paging = TRUE,
+    buttons = c("csv","excel")
+  )
+)
+```

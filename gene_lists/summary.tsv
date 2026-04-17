@@ -1,0 +1,4 @@
+comparison	n_total	n_DDR	n_Transport	n_ETC	n_ATPases_broad	n_ATPases_PVFF	n_ABC	n_PVFF_dropped
+As_vs_Control	1063	34	96	4	47	12	7	34
+Cr_vs_Control	3633	164	285	43	130	22	17	102
+As_vs_Cr	3999	160	288	43	142	31	17	106

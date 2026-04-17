@@ -1,0 +1,411 @@
+---
+title: "Enrichment Analysis – Final Report (Email)"
+author: "Cristy Medina Armijo"
+date: "2026-03-18"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    self_contained: true
+---
+
+```{r init, include=FALSE}
+options(stringsAsFactors = FALSE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+project_dir <- "C:/Users/kuris/OneDrive/Escritorio/tesis/trancriptoma"
+setwd(project_dir)
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+pkgs <- c(
+  "dplyr","tidyr","stringr","readr","ggplot2","DT",
+  "clusterProfiler","AnnotationDbi","GO.db"
+)
+missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing)) stop("Faltan paquetes: ", paste(missing, collapse = ", "))
+
+library(dplyr); library(tidyr); library(stringr); library(readr)
+library(ggplot2); library(DT)
+library(clusterProfiler); library(AnnotationDbi); library(GO.db)
+
+stopifnot(dir.exists("deseq2_out"), dir.exists("emapper_out"))
+pkgs <- c(
+  "dplyr","tidyr","stringr","readr","ggplot2","DT",
+  "clusterProfiler","AnnotationDbi","GO.db",
+  "KEGGREST"
+)
+# ... (tu chequeo missing igual)
+library(KEGGREST)
+```
+
+```{r config_and_load, include=FALSE}
+# Contrastes
+contrasts_estado <- c("T_vs_C")
+contrasts_exposicion <- c("As_vs_Cr", "Cr_vs_Control", "As_vs_Control")
+report_contrasts <- c(contrasts_estado, contrasts_exposicion)
+
+# Inputs
+map_file <- "deseq2_out/gene_id_mapping.tsv"
+if (!file.exists(map_file)) stop("No existe: ", map_file)
+map <- readr::read_tsv(map_file, show_col_types = FALSE)
+
+emapper_file <- list.files(
+  "emapper_out",
+  pattern = "emapper\\.annotations(\\.bak)?$|\\.annotations(\\.bak)?$",
+  full.names = TRUE
+)
+if (length(emapper_file) == 0) stop("No se encontró eggNOG annotations en emapper_out/")
+emapper <- readr::read_tsv(emapper_file[1], comment = "##", show_col_types = FALSE)
+
+deg_files <- list.files("deseq2_out", pattern = "^DEG_.*\\.tsv$", full.names = TRUE)
+deg_files <- deg_files[!grepl("_sig_padj", basename(deg_files))]
+
+contrast_name_from_path <- function(p) {
+  x <- basename(p)
+  x <- sub("^DEG_", "", x)
+  x <- sub("\\.tsv$", "", x)
+  x
+}
+names(deg_files) <- vapply(deg_files, contrast_name_from_path, character(1))
+
+missing_deg <- setdiff(report_contrasts, names(deg_files))
+if (length(missing_deg) > 0) stop("Faltan DEG_*.tsv para: ", paste(missing_deg, collapse = ", "))
+```
+
+```{r}
+# Cache para no golpear KEGG cada render
+cache_dir <- file.path("cache")
+dir.create(cache_dir, showWarnings = FALSE)
+kegg_cache_file <- file.path(cache_dir, "kegg_term2name.rds")
+
+# helper: safe KEGG GET
+safe_kegg_get <- function(ids) {
+  tryCatch(KEGGREST::keggGet(ids), error = function(e) NULL)
+}
+
+build_kegg_term2name <- function(ko_terms, path_terms) {
+  # ---- KO names ----
+  ko_terms <- sort(unique(ko_terms))
+  ko_desc <- rep(NA_character_, length(ko_terms))
+  names(ko_desc) <- ko_terms
+
+  # KEGG permite pedir varios IDs, pero mejor en batches
+  batch_size <- 10
+  ko_batches <- split(ko_terms, ceiling(seq_along(ko_terms) / batch_size))
+
+  for (b in ko_batches) {
+    res <- safe_kegg_get(b)
+    if (is.null(res)) next
+    for (x in res) {
+      if (is.null(x$ENTRY)) next
+      # ENTRY suele ser "K00844"
+      id <- sub("\\s.*$", "", x$ENTRY)
+      # NAME a veces viene como vector, tomamos el primero
+      nm <- x$NAME
+      if (length(nm) > 0) nm <- nm[[1]] else nm <- NA_character_
+      ko_desc[id] <- nm
+    }
+  }
+
+  ko_term2name <- tibble::tibble(
+    term = names(ko_desc),
+    description = unname(ko_desc)
+  ) %>%
+    dplyr::mutate(description = dplyr::if_else(is.na(description), term, description))
+
+  # ---- Pathway names ----
+  path_terms <- sort(unique(path_terms))
+
+  # eggNOG puede traer cosas como "map00010" o "ko00010" u otros strings.
+  # KEGGREST espera pathway IDs tipo "path:map00010".
+  path_ids <- path_terms[stringr::str_detect(path_terms, "^(map|ko)\\d{5}$")]
+  path_query <- paste0("path:", path_ids)
+
+  path_desc <- rep(NA_character_, length(path_ids))
+  names(path_desc) <- path_ids
+
+  path_batches <- split(path_query, ceiling(seq_along(path_query) / batch_size))
+  for (b in path_batches) {
+    res <- safe_kegg_get(b)
+    if (is.null(res)) next
+    for (x in res) {
+      if (is.null(x$ENTRY)) next
+      # ENTRY suele ser "path:map00010"
+      entry <- sub("\\s.*$", "", x$ENTRY)
+      entry <- sub("^path:", "", entry)
+      nm <- x$NAME
+      if (length(nm) > 0) nm <- nm[[1]] else nm <- NA_character_
+      path_desc[entry] <- nm
+    }
+  }
+
+  path_term2name <- tibble::tibble(
+    term = path_terms,
+    description = dplyr::case_when(
+      term %in% names(path_desc) & !is.na(path_desc[term]) ~ unname(path_desc[term]),
+      TRUE ~ term
+    )
+  )
+
+  list(ko_term2name = ko_term2name, path_term2name = path_term2name)
+}
+
+if (file.exists(kegg_cache_file)) {
+  kegg_names <- readRDS(kegg_cache_file)
+} else {
+  kegg_names <- build_kegg_term2name(
+    ko_terms = unique(ko_term2gene$term),
+    path_terms = unique(keggpath_term2gene$term)
+  )
+  saveRDS(kegg_names, kegg_cache_file)
+}
+
+ko_term2name <- kegg_names$ko_term2name
+keggpath_term2name <- kegg_names$path_term2name
+```
+
+
+```{r term2gene, include=FALSE}
+# genes_base
+genes_base <- emapper %>%
+  dplyr::rename(gene_id = `#query`) %>%
+  dplyr::left_join(map %>% dplyr::select(gene_id, pretty_id), by = "gene_id") %>%
+  dplyr::mutate(pretty_id = dplyr::coalesce(pretty_id, gene_id))
+
+# GO TERM2GENE
+go_term2gene <- genes_base %>%
+  dplyr::select(pretty_id, GOs) %>%
+  dplyr::filter(!is.na(GOs), GOs != "-") %>%
+  tidyr::separate_rows(GOs, sep = ",") %>%
+  dplyr::mutate(GOs = stringr::str_trim(GOs)) %>%
+  dplyr::filter(stringr::str_detect(GOs, "^GO:\\d+")) %>%
+  dplyr::transmute(term = GOs, gene = pretty_id) %>%
+  dplyr::distinct()
+
+# KEGG Pathway TERM2GENE
+keggpath_term2gene <- genes_base %>%
+  dplyr::select(pretty_id, KEGG_Pathway) %>%
+  dplyr::filter(!is.na(KEGG_Pathway), KEGG_Pathway != "-") %>%
+  tidyr::separate_rows(KEGG_Pathway, sep = ",") %>%
+  dplyr::mutate(KEGG_Pathway = stringr::str_trim(KEGG_Pathway)) %>%
+  dplyr::transmute(term = KEGG_Pathway, gene = pretty_id) %>%
+  dplyr::distinct()
+
+# Universos
+universe_go <- sort(unique(go_term2gene$gene))
+universe_kegg_path <- sort(unique(keggpath_term2gene$gene))
+```
+
+```{r go_split, include=FALSE}
+go_terms <- sort(unique(go_term2gene$term))
+
+ont_vec <- AnnotationDbi::select(
+  GO.db::GO.db,
+  keys = go_terms,
+  columns = c("ONTOLOGY", "TERM"),
+  keytype = "GOID"
+)
+
+go_term2name <- ont_vec %>%
+  dplyr::transmute(term = GOID, description = TERM) %>%
+  dplyr::distinct()
+
+go_term2ont <- ont_vec %>%
+  dplyr::transmute(term = GOID, ontology = ONTOLOGY) %>%
+  dplyr::distinct()
+
+go_bp_term2gene <- go_term2gene %>%
+  dplyr::inner_join(go_term2ont %>% dplyr::filter(ontology == "BP"), by = "term") %>%
+  dplyr::select(term, gene)
+
+go_mf_term2gene <- go_term2gene %>%
+  dplyr::inner_join(go_term2ont %>% dplyr::filter(ontology == "MF"), by = "term") %>%
+  dplyr::select(term, gene)
+
+go_cc_term2gene <- go_term2gene %>%
+  dplyr::inner_join(go_term2ont %>% dplyr::filter(ontology == "CC"), by = "term") %>%
+  dplyr::select(term, gene)
+```
+
+```{r helpers, include=FALSE}
+read_deg_with_pretty <- function(deg_path, map_tbl) {
+  readr::read_tsv(deg_path, show_col_types = FALSE) %>%
+    dplyr::left_join(map_tbl %>% dplyr::select(gene_id, pretty_id), by = "gene_id") %>%
+    dplyr::mutate(pretty_id = dplyr::coalesce(pretty_id, gene_id))
+}
+
+run_enricher <- function(gene_list, term2gene, term2name = NULL, universe, p_adjust_method = "BH") {
+  gene_list <- unique(stats::na.omit(gene_list))
+  if (length(gene_list) == 0) return(NULL)
+
+  enr <- clusterProfiler::enricher(
+    gene = gene_list,
+    universe = universe,
+    TERM2GENE = term2gene,
+    TERM2NAME = term2name,
+    pAdjustMethod = p_adjust_method
+  )
+  if (is.null(enr) || nrow(as.data.frame(enr)) == 0) return(NULL)
+  enr
+}
+
+enrich_to_table <- function(enr) {
+  if (is.null(enr)) return(dplyr::tibble())
+  as.data.frame(enr) %>%
+    dplyr::transmute(
+      Term = ID,
+      Description = Description,
+      GeneRatio = GeneRatio,
+      BgRatio = BgRatio,
+      pvalue = pvalue,
+      padjust = p.adjust,
+      count = Count
+    ) %>%
+    dplyr::arrange(padjust, pvalue, dplyr::desc(count))
+}
+
+dt_opts <- function(pageLength = 15) {
+  list(
+    dom = "Bfrtip",
+    pageLength = pageLength,
+    scrollX = TRUE,
+    buttons = c("csv", "excel"),
+    lengthMenu = list(c(10, 15, 25, 50, 100), c("10", "15", "25", "50", "100"))
+  )
+}
+
+dt_table <- function(df, caption) {
+  DT::datatable(df, extensions = "Buttons", options = dt_opts(15), caption = caption, rownames = FALSE)
+}
+
+dotplot_or_note <- function(enr, title, show_n = 15) {
+  if (is.null(enr)) {
+    grid::grid.text(paste0(title, "\n(sin términos enriquecidos)"))
+    return(invisible(NULL))
+  }
+  print(clusterProfiler::dotplot(enr, showCategory = show_n) + ggplot2::ggtitle(title))
+}
+```
+
+```{r precompute, include=FALSE}
+results_by_contrast <- list()
+
+for (cn in report_contrasts) {
+  deg <- read_deg_with_pretty(deg_files[[cn]], map) %>%
+    dplyr::arrange(padj, dplyr::desc(abs(log2FoldChange)))
+
+  sig_genes <- deg %>%
+    dplyr::filter(!is.na(padj) & padj < 0.05) %>%
+    dplyr::pull(pretty_id) %>%
+    unique()
+
+  enr_bp <- run_enricher(sig_genes, go_bp_term2gene, go_term2name, universe = universe_go)
+  enr_mf <- run_enricher(sig_genes, go_mf_term2gene, go_term2name, universe = universe_go)
+  enr_cc <- run_enricher(sig_genes, go_cc_term2gene, go_term2name, universe = universe_go)
+
+  sig_kegg_path <- intersect(sig_genes, universe_kegg_path)
+ enr_kegg_path <- run_enricher(
+  sig_kegg_path,
+  keggpath_term2gene,
+  term2name = keggpath_term2name,
+  universe = universe_kegg_path
+)
+
+enr_kegg_ko <- run_enricher(
+  sig_kegg_ko,
+  ko_term2gene,
+  term2name = ko_term2name,
+  universe = universe_kegg_ko
+)
+
+  results_by_contrast[[cn]] <- list(
+    deg = deg,
+    sig_n = length(sig_genes),
+    go_bp = enr_bp, go_mf = enr_mf, go_cc = enr_cc,
+    kegg_path = enr_kegg_path
+  )
+}
+```
+
+# Overall Results — Estado (T_vs_C)
+
+```{r estado_t_vs_c, results='asis'}
+cn <- "T_vs_C"
+obj <- results_by_contrast[[cn]]
+
+cat("## Differential Expression Analysis — ", cn, "\n\n", sep = "")
+cat("**Genes DE significativos (padj < 0.05):** ", obj$sig_n, "\n\n", sep = "")
+
+deg_df <- obj$deg %>% dplyr::select(gene_id, pretty_id, baseMean, log2FoldChange, lfcSE, stat, pvalue, padj)
+dt_table(deg_df, caption = paste0("DESeq2 Results: ", cn))
+
+cat("\n\n## Enrichment Analysis — GO BP (", cn, ")\n\n", sep = "")
+dt_table(enrich_to_table(obj$go_bp), caption = paste0("GO BP: ", cn))
+```
+
+```{r estado_go_bp_plot, fig.height=6, fig.width=9}
+dotplot_or_note(results_by_contrast[["T_vs_C"]]$go_bp, "Dotplot GO BP — T_vs_C", show_n = 15)
+```
+
+```{r estado_go_mf_cc_kegg, results='asis'}
+cn <- "T_vs_C"
+obj <- results_by_contrast[[cn]]
+
+cat("\n\n## Enrichment Analysis — GO MF (", cn, ")\n\n", sep = "")
+dt_table(enrich_to_table(obj$go_mf), caption = paste0("GO MF: ", cn))
+
+cat("\n\n## Enrichment Analysis — GO CC (", cn, ")\n\n", sep = "")
+dt_table(enrich_to_table(obj$go_cc), caption = paste0("GO CC: ", cn))
+
+cat("\n\n## Enrichment Analysis — KEGG Pathway (", cn, ")\n\n", sep = "")
+dt_table(enrich_to_table(obj$kegg_path), caption = paste0("KEGG Pathway: ", cn))
+```
+
+```{r estado_plots_rest, fig.height=6, fig.width=9}
+dotplot_or_note(results_by_contrast[["T_vs_C"]]$go_mf, "Dotplot GO MF — T_vs_C", show_n = 15)
+dotplot_or_note(results_by_contrast[["T_vs_C"]]$go_cc, "Dotplot GO CC — T_vs_C", show_n = 15)
+dotplot_or_note(results_by_contrast[["T_vs_C"]]$kegg_path, "Dotplot KEGG Pathway — T_vs_C", show_n = 15)
+```
+
+# Overall Results — Exposición
+
+```{r exposicion_loop, results='asis'}
+for (cn in c("As_vs_Cr", "Cr_vs_Control", "As_vs_Control")) {
+  obj <- results_by_contrast[[cn]]
+
+  cat("\n\n# Exposición — ", cn, "\n\n", sep = "")
+
+  cat("## Differential Expression Analysis — ", cn, "\n\n", sep = "")
+  cat("**Genes DE significativos (padj < 0.05):** ", obj$sig_n, "\n\n", sep = "")
+
+  deg_df <- obj$deg %>% dplyr::select(gene_id, pretty_id, baseMean, log2FoldChange, lfcSE, stat, pvalue, padj)
+  print(dt_table(deg_df, caption = paste0("DESeq2 Results: ", cn)))
+
+  cat("\n\n## Enrichment Analysis — GO BP (", cn, ")\n\n", sep = "")
+  print(dt_table(enrich_to_table(obj$go_bp), caption = paste0("GO BP: ", cn)))
+
+  cat("\n\n## Enrichment Analysis — GO MF (", cn, ")\n\n", sep = "")
+  print(dt_table(enrich_to_table(obj$go_mf), caption = paste0("GO MF: ", cn)))
+
+  cat("\n\n## Enrichment Analysis — GO CC (", cn, ")\n\n", sep = "")
+  print(dt_table(enrich_to_table(obj$go_cc), caption = paste0("GO CC: ", cn)))
+
+  cat("\n\n## Enrichment Analysis — KEGG Pathway (", cn, ")\n\n", sep = "")
+  print(dt_table(enrich_to_table(obj$kegg_path), caption = paste0("KEGG Pathway: ", cn)))
+}
+```
+
+```{r exposicion_plots, fig.height=6, fig.width=9}
+for (cn in c("As_vs_Cr", "Cr_vs_Control", "As_vs_Control")) {
+  obj <- results_by_contrast[[cn]]
+  dotplot_or_note(obj$go_bp, paste0("Dotplot GO BP — ", cn), show_n = 15)
+  dotplot_or_note(obj$go_mf, paste0("Dotplot GO MF — ", cn), show_n = 15)
+  dotplot_or_note(obj$go_cc, paste0("Dotplot GO CC — ", cn), show_n = 15)
+  dotplot_or_note(obj$kegg_path, paste0("Dotplot KEGG Pathway — ", cn), show_n = 15)
+}

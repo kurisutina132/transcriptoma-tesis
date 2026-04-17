@@ -1,0 +1,30 @@
+﻿# --- Raw data / huge files ---
+Reads/
+trimmed/
+salmon_index/
+cache/
+QC_pre/
+QC_post/
+*.zip
+
+# --- Common bioinformatics outputs that can be huge ---
+*.fastq
+*.fastq.gz
+*.fq.gz
+*.bam
+*.sam
+*.cram
+
+# --- R ---
+.Rhistory
+.RData
+r_objects/
+
+# --- Logs / temp ---
+*.log
+tmp/
+temp/
+
+# --- OS ---
+.DS_Store
+Thumbs.db

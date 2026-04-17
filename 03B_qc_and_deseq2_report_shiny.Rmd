@@ -1,0 +1,417 @@
+---
+title: "3–4. Control de calidad y resultados (DESeq2)"
+author: "Cristy Medina Armijo"
+date: "2026-03-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+runtime: shiny
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+setwd("C:/Users/kuris/OneDrive/Escritorio/tesis/trancriptoma")
+rmarkdown::run("03B_qc_and_deseq2_report_shiny.Rmd")
+```
+```{r}
+list(
+  shiny_is_running = shiny::isRunning(),
+  has_input = exists("input", inherits = TRUE),
+  has_output = exists("output", inherits = TRUE)
+)
+```
+
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(DESeq2)
+library(readr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(DT)
+library(pheatmap)
+library(shiny)
+library(htmltools)
+library(tibble)
+```
+
+```{r load_data}
+project_root <- "C:/Users/kuris/OneDrive/Escritorio/tesis/trancriptoma"
+setwd(project_root)
+
+dds <- readRDS("deseq2_out/dds.rds")
+map <- read_tsv("deseq2_out/gene_id_mapping.tsv", show_col_types = FALSE)
+
+# colData with robust rowname key
+coldata <- as.data.frame(colData(dds)) %>%
+  tibble::rownames_to_column("sample_id")
+
+# ---- Sample label normalizer ----
+# Ejemplo: "C1_me_02768AAE_GGTCAATTGC-ATTCCTTGCA" -> "C1_me"
+#          "T4_cr_ABC..." -> "T4_cr"
+clean_sample_label <- function(x) {
+  x <- as.character(x)
+  x <- sub("_.*$", "", x)         # quita todo desde el primer "_"
+  x
+}
+
+# preferred order (ya sin sufijos)
+preferred_order <- c("C1_me","C2_me","C3_me","T1_as","T2_as","T3_as","T4_cr","T5_cr","T6_cr")
+
+# Detect condition column if exists; otherwise derive from sample label
+detect_condition_col <- function(df) {
+  candidates <- c("condition","group","treatment","estado","exposicion","exposure","Estado","Exposicion")
+  hit <- candidates[candidates %in% colnames(df)][1]
+  if (!is.na(hit)) return(hit)
+  NA_character_
+}
+
+condition_from_label <- function(lbl) {
+  s2 <- tolower(lbl)
+  dplyr::case_when(
+    str_detect(s2, "^c") ~ "Control",
+    str_detect(s2, "as") ~ "As",
+    str_detect(s2, "cr") ~ "Cr",
+    TRUE ~ "Unknown"
+  )
+}
+
+chosen_condition_col <- detect_condition_col(coldata)
+
+# Build canonical label for every sample_id
+coldata <- coldata %>%
+  mutate(sample_label = clean_sample_label(sample_id))
+
+# If no explicit condition column, create one from labels
+if (is.na(chosen_condition_col)) {
+  coldata <- coldata %>% mutate(condition_plot = condition_from_label(sample_label))
+  chosen_condition_col <- "condition_plot"
+} else {
+  # Use existing condition column as plot condition
+  coldata <- coldata %>% mutate(condition_plot = as.character(.data[[chosen_condition_col]]))
+  chosen_condition_col <- "condition_plot"
+}
+
+coldata$condition_plot <- as.factor(coldata$condition_plot)
+```
+
+# 3. Control de calidad (QC)
+
+## 3.1 Tabla general de recuentos por muestra (nomenclatura nueva)
+
+```{r}
+counts_tbl <- read_tsv("deseq2_out/sample_gene_counts.tsv", show_col_types = FALSE)
+
+# Normaliza nombres de columnas (muestras)
+old_cols <- colnames(counts_tbl)
+new_cols <- ifelse(old_cols == "pretty_id", "pretty_id", clean_sample_label(old_cols))
+colnames(counts_tbl) <- new_cols
+
+# Pon las columnas preferidas primero si existen
+preferred <- c("pretty_id", preferred_order)
+existing_pref <- preferred[preferred %in% colnames(counts_tbl)]
+rest <- setdiff(colnames(counts_tbl), existing_pref)
+counts_tbl2 <- counts_tbl %>% select(all_of(existing_pref), all_of(rest))
+
+DT::datatable(
+  counts_tbl2,
+  rownames = FALSE,
+  extensions = c("Buttons", "Scroller"),
+  options = list(
+    dom = "Bfrtip",
+    pageLength = 10,
+    scrollX = TRUE,
+    scrollY = 300,
+    scroller = TRUE,
+    paging = TRUE,
+    buttons = c("csv","excel")
+  )
+)
+```
+
+# 3.2 PCA (VST; top 500 genes más variables)
+
+```{r}
+pca_samples <- readRDS("deseq2_out/pca_samples_500var.rds")
+expl_var <- attr(pca_samples, "explained_variance")
+
+# Normalize key
+if ("sample" %in% names(pca_samples) && !"sample_id" %in% names(pca_samples)) {
+  pca_samples <- pca_samples %>% rename(sample_id = sample)
+}
+
+pca_samples <- pca_samples %>%
+  left_join(coldata %>% select(sample_id, sample_label, condition_plot), by = "sample_id")
+
+ggplot(pca_samples, aes(x = PC1, y = PC2, color = condition_plot, label = sample_label)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.7, size = 3) +
+  labs(
+    title = "PCA (VST) – Top 500 genes más variables",
+    x = paste0("PC1 (", scales::percent(expl_var[1], accuracy = 0.1), ")"),
+    y = paste0("PC2 (", scales::percent(expl_var[2], accuracy = 0.1), ")"),
+    color = "Condición"
+  ) +
+  theme_bw()
+```
+
+# 3.3 Biplot PCA (muestras + genes responsables)
+
+```{r}
+bp <- readRDS("deseq2_out/pca_biplot_50genes.rds")
+scores <- bp$scores
+loadings <- bp$loadings
+expl_var <- bp$expl_var
+
+# Escala automática para flechas
+rx <- diff(range(scores$PC1))
+ry <- diff(range(scores$PC2))
+arrow_scale <- 0.35 * min(rx, ry) / max(abs(c(loadings$PC1, loadings$PC2)))
+arrow_scale <- ifelse(is.finite(arrow_scale) && arrow_scale > 0, arrow_scale, 10)
+
+# Etiquetar solo genes más extremos
+loadings <- loadings %>%
+  mutate(dist = sqrt(PC1^2 + PC2^2)) %>%
+  arrange(desc(dist))
+label_genes <- loadings %>% slice_head(n = 10)
+
+# Normalizar labels de muestras
+scores2 <- scores %>%
+  rename(sample_id = sample) %>%
+  mutate(sample_label = clean_sample_label(sample_id))
+
+ggplot() +
+  geom_point(data = scores2, aes(PC1, PC2), size = 3) +
+  geom_text(data = scores2, aes(PC1, PC2, label = sample_label), vjust = -0.7, size = 3) +
+  geom_segment(
+    data = loadings,
+    aes(x = 0, y = 0, xend = PC1 * arrow_scale, yend = PC2 * arrow_scale),
+    arrow = arrow(length = grid::unit(0.12, "inches")),
+    alpha = 0.55,
+    linewidth = 0.4
+  ) +
+  geom_text(
+    data = label_genes,
+    aes(x = PC1 * arrow_scale, y = PC2 * arrow_scale, label = pretty_id),
+    size = 3,
+    vjust = -0.3
+  ) +
+  labs(
+    title = "Biplot PCA (VST): muestras + top 50 genes más variables",
+    x = paste0("PC1 (", scales::percent(expl_var[1], accuracy = 0.1), ")"),
+    y = paste0("PC2 (", scales::percent(expl_var[2], accuracy = 0.1), ")")
+  ) +
+  theme_bw()
+```
+
+# 3.4 Correlación entre muestras (Pearson; color = 1 - r)
+
+```{r}
+cor_df <- read_tsv("deseq2_out/sample_cor_1minusR.tsv", show_col_types = FALSE) %>%
+  mutate(
+    sample1 = clean_sample_label(sample1),
+    sample2 = clean_sample_label(sample2)
+  )
+
+cor_mat <- cor_df %>%
+  pivot_wider(names_from = sample2, values_from = value) %>%
+  as.data.frame()
+
+rownames(cor_mat) <- cor_mat$sample1
+cor_mat$sample1 <- NULL
+cor_mat <- as.matrix(cor_mat)
+
+common <- intersect(preferred_order, colnames(cor_mat))
+if (length(common) >= 2) {
+  cor_mat <- cor_mat[common, common, drop = FALSE]
+}
+
+pheatmap::pheatmap(
+  cor_mat,
+  main = "Distancia por correlación (1 - Pearson r)",
+  color = colorRampPalette(c("#2166AC", "white", "#B2182B"))(100),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  border_color = NA,
+  fontsize_row = 10,
+  fontsize_col = 10,
+  angle_col = 45
+)
+```
+
+# 4. Análisis diferencial de expresión (DESeq2)
+
+## 4.1 Funciones auxiliares
+
+```{r}
+read_deseq2_tbl <- function(path) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    left_join(map, by = "gene_id") %>%
+    mutate(pretty_id = coalesce(pretty_id, gene_id)) %>%
+    transmute(
+      `Identificación genética` = pretty_id,
+      `media base` = baseMean,
+      `log2Cambio de pliegue` = log2FoldChange,
+      lfcSE = lfcSE,
+      stat = stat,
+      `valor p` = pvalue,
+      padj = padj
+    )
+}
+
+summarize_deg <- function(path, padj_cut = 0.05, lfc_cut = 0.3) {
+  x <- read_tsv(path, show_col_types = FALSE)
+  detected <- sum(x$baseMean > 0, na.rm = TRUE)
+  sig <- x %>% filter(!is.na(padj), padj < padj_cut)
+  up <- sig %>% filter(log2FoldChange >= lfc_cut)
+  down <- sig %>% filter(log2FoldChange <= -lfc_cut)
+
+  tibble(
+    genes_detectados = detected,
+    DEGs_padj_0.05 = nrow(sig),
+    sobreexpresados = nrow(up),
+    subexpresados = nrow(down)
+  )
+}
+
+volcano_plot <- function(path, title, padj_cut = 0.05, lfc_cut = 0.3) {
+  df <- read_tsv(path, show_col_types = FALSE) %>%
+    left_join(map, by = "gene_id") %>%
+    mutate(pretty_id = coalesce(pretty_id, gene_id),
+           neglog10 = -log10(pmax(padj, 1e-300))) %>%
+    mutate(cat = case_when(
+      !is.na(padj) & padj < padj_cut & abs(log2FoldChange) > lfc_cut ~ "DEG |log2FC|>0.3",
+      !is.na(padj) & padj < padj_cut ~ "DEG padj<0.05",
+      TRUE ~ "No sig"
+    ))
+
+  ggplot(df, aes(x = log2FoldChange, y = neglog10, color = cat)) +
+    geom_point(alpha = 0.6, size = 1.2) +
+    scale_color_manual(values = c("No sig"="grey75", "DEG padj<0.05"="blue", "DEG |log2FC|>0.3"="red")) +
+    labs(title = title, x = "log2FoldChange", y = "-log10(padj)", color = "") +
+    theme_bw()
+}
+
+ma_plot <- function(path, title, padj_cut = 0.05) {
+  df <- read_tsv(path, show_col_types = FALSE) %>%
+    mutate(sig = !is.na(padj) & padj < padj_cut)
+
+  ggplot(df, aes(x = log10(pmax(baseMean, 1e-6)), y = log2FoldChange, color = sig)) +
+    geom_point(alpha = 0.5, size = 1.1) +
+    scale_color_manual(values = c(`TRUE`="red", `FALSE`="grey70")) +
+    labs(title = title, x = "log10(media base)", y = "log2Cambio de pliegue", color = paste0("padj<", padj_cut)) +
+    theme_bw()
+}
+
+heatmap_degs_top20 <- function(path, title, padj_cut = 0.05) {
+  vst <- readRDS("deseq2_out/vst_assay.rds")
+  res <- read_tsv(path, show_col_types = FALSE) %>%
+    filter(!is.na(padj), padj < padj_cut) %>%
+    arrange(padj) %>%
+    slice_head(n = 20) %>%
+    left_join(map, by = "gene_id") %>%
+    mutate(pretty_id = coalesce(pretty_id, gene_id))
+
+  genes <- res$gene_id
+  mat <- vst[genes, , drop = FALSE]
+  rownames(mat) <- res$pretty_id
+
+  colnames(mat) <- clean_sample_label(colnames(mat))
+
+  common <- intersect(preferred_order, colnames(mat))
+  if (length(common) >= 2) mat <- mat[, common, drop = FALSE]
+
+  mat_z <- t(scale(t(mat)))
+
+  pheatmap::pheatmap(
+    mat_z,
+    main = title,
+    border_color = NA,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    fontsize_row = 9,
+    fontsize_col = 10,
+    angle_col = 45
+  )
+}
+
+top20_gene_list <- function(path, padj_cut = 0.05) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    filter(!is.na(padj), padj < padj_cut) %>%
+    mutate(abs_lfc = abs(log2FoldChange)) %>%
+    arrange(desc(abs_lfc), padj) %>%
+    slice_head(n = 20) %>%
+    left_join(map, by = "gene_id") %>%
+    mutate(pretty_id = coalesce(pretty_id, gene_id)) %>%
+    transmute(
+      `Identificación genética` = pretty_id,
+      media_base = baseMean,
+      log2FoldChange = log2FoldChange,
+      padj = padj
+    )
+}
+```
+
+## 4.2 Contraste: Control vs As (As_vs_Control)
+
+```{r}
+summarize_deg("deseq2_out/DEG_As_vs_Control.tsv")
+ma_plot("deseq2_out/DEG_As_vs_Control.tsv", "MA plot – As vs Control")
+volcano_plot("deseq2_out/DEG_As_vs_Control.tsv", "Volcano – As vs Control (padj<0.05; |log2FC|>0.3)")
+heatmap_degs_top20("deseq2_out/DEG_As_vs_Control.tsv", "Heatmap Top 20 DEGs – As vs Control")
+```
+
+### Tabla DESeq2 (interactiva)
+```{r}
+DT::datatable(
+  read_deseq2_tbl("deseq2_out/DEG_As_vs_Control.tsv"),
+  rownames = FALSE,
+  extensions = "Buttons",
+  options = list(dom="Bfrtip", buttons=c("csv","excel"), pageLength=10, scrollX=TRUE)
+)
+```
+
+### Top 20 genes (clickeable → plotCounts; sin IDs Illumina)
+```{r}
+top_as <- top20_gene_list("deseq2_out/DEG_As_vs_Control.tsv")
+
+DT::datatable(
+  top_as,
+  rownames = FALSE,
+  selection = "single",
+  options = list(pageLength = 10, scrollX = TRUE),
+  elementId = "top_as_tbl"
+)
+
+plotOutput("top_as_counts_plot", height = 350)
+
+output$top_as_counts_plot <- renderPlot({
+  req(input$top_as_tbl_rows_selected)
+  sel <- input$top_as_tbl_rows_selected
+  req(length(sel) == 1)
+
+  gene_choice <- top_as$`Identificación genética`[sel]
+  gid <- map %>% filter(pretty_id == gene_choice) %>% pull(gene_id) %>% .[1]
+  validate(need(!is.na(gid), "No se pudo mapear el gen seleccionado a gene_id real."))
+
+  dfc <- as.data.frame(DESeq2::plotCounts(dds, gene = gid, intgroup = chosen_condition_col, returnData = TRUE))
+  dfc$cond_label <- clean_sample_label(as.character(dfc[[chosen_condition_col]]))
+
+  ggplot(dfc, aes(x = cond_label, y = count)) +
+    geom_point(position = position_jitter(width = 0.15), size = 2) +
+    labs(title = paste0("Counts vs condición – ", gene_choice),
+         y = "Normalized count", x = "Condición") +
+    theme_bw()
+})
+```
+

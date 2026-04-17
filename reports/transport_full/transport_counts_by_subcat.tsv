@@ -1,0 +1,13 @@
+comparison	subcat	n
+As_vs_Control	Metal	17
+As_vs_Control	MDR	3
+As_vs_Control	Nutrient	27
+As_vs_Control	Other	49
+Cr_vs_Control	Metal	30
+Cr_vs_Control	MDR	12
+Cr_vs_Control	Nutrient	62
+Cr_vs_Control	Other	181
+As_vs_Cr	Metal	23
+As_vs_Cr	MDR	12
+As_vs_Cr	Nutrient	67
+As_vs_Cr	Other	186

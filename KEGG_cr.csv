@@ -1,0 +1,24 @@
+Term;Description;GeneRatio;BgRatio;pvalue;p.adjust;rich_factor;count
+ko00010;Glycolysis / Gluconeogenesis;20/4495;41/9975;0;0;1,082503595;41
+ko00030;Pentose phosphate pathway;9/4495;25/9975;0;0;0,798887653;25
+ko00071;Fatty acid degradation;18/4495;38/9975;0;0;1,051167964;38
+ko00190;Oxidative phosphorylation;41/4495;89/9975;0;0;1,022296934;89
+ko00230;Purine metabolism;27/4495;63/9975;0;0;0,95105673;63
+ko00240;Pyrimidine metabolism;14/4495;39/9975;0;0;1,53632241;39
+ko00250;Alanine, aspartate and glutamate metabolism;19/4495;41/9975;0;0;1,028378415;41
+ko00270;Cysteine and methionine metabolism;14/4495;49/9975;0;0;0,63403782;49
+ko00280;Valine, leucine and isoleucine degradation;22/4495;55/9975;0;0;0,887652948;55
+ko00310;Lysine degradation;9/4495;29/9975;0;0;0,688696253;29
+ko00330;Arginine and proline metabolism;15/4495;59/9975;0;0;0,564186196;59
+ko00350;Tyrosine metabolism;20/4495;45/9975;0;0;0,986281053;45
+ko00360;Phenylalanine metabolism;14/4495;40/9975;0;0;0,776696329;40
+ko00380;Tryptophan metabolism;25/4495;62/9975;0;0;0,894811439;62
+ko00480;Glutathione metabolism;18/4495;42/9975;0;0;0,95105673;42
+ko04714;Thermogenesis;37/4495;89/9975;0;0;0,922560648;89
+ko04214;Apoptosis - fly;3/4495;10/9975;0,00045;0,00045;0,665739711;10
+ko00040;Pentose and glucuronate interconversions;11/4495;22/9975;0,00071;0,00071;1,109566185;22
+ko04810;Regulation of actin cytoskeleton;12/4495;23/9975;0,00115;0,00115;1,210435838;23
+ko04138;Autophagy - yeast;35/4495;70/9975;0;0;1,109566185;70
+ko04139;Mitophagy - yeast;13/4495;33/9975;0;0;0,874203661;33
+ko03018;RNA degradation;16/4495;48/9975;0;0;0,73971079;48
+ko03020;RNA polymerase;7/4495;24/9975;0;0;0,647246941;24

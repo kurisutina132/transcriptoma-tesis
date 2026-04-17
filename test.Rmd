@@ -1,0 +1,23 @@
+---
+title: "test"
+author: "Cristy Medina Armijo"
+date: "2026-03-13"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/kuris/OneDrive/Escritorio/tesis/trancriptoma")
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+```{r}
+sidebarLayout(
+  sidebarPanel(selectInput("x","x",choices=c("a","b"))),
+  mainPanel(verbatimTextOutput("y"))
+)
+```
+
+```{r}
+output$y <- renderPrint(input$x)
+```
