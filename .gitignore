@@ -30,3 +30,14 @@ temp/
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+# --- Exclude huge InterProScan outputs ---
+interproscan_out/
+*.tsv
+
+# --- Exclude ML artifacts (not transcriptome) ---
+results/
+*.RDS
+interproscan_out/interproscan.tsv
+results/captive/models_all.RDS
+results/captive/results/captive/models_all.RDS
