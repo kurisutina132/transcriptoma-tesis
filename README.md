@@ -1,10 +1,15 @@
-﻿# Transcriptome analysis (fungi)
+﻿# Transcriptome analysis Fungi (RNA-seq) — PhD thesis
 
-Main reports included:
-- QC (MultiQC; Salmon quantification)
-- Differential expression (DESeq2) — report P260312
-- Enrichment analysis (EggNOG-mapper; fungi-filtered; interpret mainly with GO / general KEGG when needed)
-- InterProScan domains/signatures + GO-based biological categorization (DDR, transport, ETC, metal tolerance)
+RNA-seq transcriptome analysis from my doctoral research: from read processing
+through differential expression to biological interpretation.
+
+## What it does
+- QC and processing of RNA-seq reads
+- Differential expression analysis between conditions
+- Functional interpretation of the differentially expressed genes
+
+## Stack
+R · DESeq2 · tidyverse
 
 ## Folders
 - 01_qc/
